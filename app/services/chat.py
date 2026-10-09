@@ -9,8 +9,10 @@ from typing import Any
 
 from app.services.embedding import generate_embedding
 from app.services.query_expander import expand_query
+from app.services.rag import rerank, generate_answer
 from app.services.database import (
     search_contents,
+    get_contents_detail,
     get_deadlines,
     get_collections,
     get_old_contents,
@@ -305,9 +307,15 @@ async def _handle_search(user_id: str, query: str, history: list[dict[str, Any]]
 
     threshold = 0.3
     raw_results = await search_contents(user_id, embedding, limit=15, threshold=threshold)
-    candidates = [r for r in raw_results if r.get("id") not in shown_ids]
-    filtered = await _filter_results(expanded, candidates[:10])
-    results = filtered[:5]
+    candidates = [r for r in raw_results if r.get("id") not in shown_ids][:10]
+
+    # 요약·분류 등 상세 필드를 붙여서 리랭킹·답변 생성의 근거로 사용
+    details = await get_contents_detail(user_id, [r["id"] for r in candidates])
+    candidates = [{**r, **details.get(r["id"], {})} for r in candidates]
+
+    # 확장 쿼리가 아니라 사용자의 실제 질문 기준으로 재정렬
+    reranked = await rerank(context_query, candidates)
+    results = reranked[:5]
 
     if not results:
         if already_asked or _has_extra_context(query):
@@ -327,22 +335,19 @@ async def _handle_search(user_id: str, query: str, history: list[dict[str, Any]]
             ],
         }
 
-    top_similarity = results[0].get("similarity", 0) if results else 0
-
-    if top_similarity >= 0.85:
-        return {
-            "answer": "이거 맞나요?",
-            "results": results[:1],
-            "follow_up_questions": ["맞아요", "아니요, 다른 거예요 — 제목이나 내용 키워드를 더 알려주시면 다시 찾아볼게요!"],
-        }
+    if results[0].get("similarity", 0) >= 0.85:
+        results = results[:1]
 
     count = len(results)
     if count == 1:
-        answer = "이거 맞나요?"
+        fallback = "이거 맞나요?"
         follow_up = ["맞아요", "아니요, 다른 거예요 — 제목이나 내용 키워드를 더 알려주시면 다시 찾아볼게요!"]
     else:
-        answer = f"관련 콘텐츠 {count}개 찾았어요. 찾으시는 거 있나요?"
+        fallback = f"관련 콘텐츠 {count}개 찾았어요. 찾으시는 거 있나요?"
         follow_up = ["이 중에 없으면 제목이나 내용 키워드를 더 알려주세요!"]
+
+    # 좁혀진 자료만 근거로 답변 생성. 실패하면 기존 고정 문구로 대체
+    answer = await generate_answer(query, results, history) or fallback
 
     return {"answer": answer, "results": results, "follow_up_questions": follow_up}
 

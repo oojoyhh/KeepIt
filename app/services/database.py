@@ -530,6 +530,29 @@ async def get_contents_by_ids(user_id: str, content_ids: list[str]) -> list[dict
         return []
 
 
+async def get_contents_detail(user_id: str, content_ids: list[str]) -> dict[str, dict]:
+    """ID 목록의 요약·분류 등 상세 필드 조회 (RAG 리랭킹·답변 생성용). {id: row} 반환"""
+    if not content_ids:
+        return {}
+    try:
+        ids_str = ','.join(content_ids)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/contents",
+                headers=_headers(),
+                params={
+                    "user_id": f"eq.{user_id}",
+                    "id": f"in.({ids_str})",
+                    "select": "id,title,one_line_summary,detailed_summary,category,sub_category,topics,thumbnail_description,saved_at",
+                },
+            )
+            response.raise_for_status()
+            return {d["id"]: d for d in response.json()}
+    except httpx.HTTPError as e:
+        print(f"[database] 상세 조회 오류: {e}")
+        return {}
+
+
 async def get_all_categories(user_id: str) -> list[str]:
     """유저의 전체 대분류 목록 (중복 제거)"""
     try:
